@@ -95,6 +95,35 @@ detect it at post time and offer two options:
    leave it commented) when sonnet is appropriate — but erring on the side of
    writing `model: sonnet` explicitly is also fine. This is guidance, not a hard
    gate.
+5b. **Suggest skills (optional).** If the task should use specific Claude Code
+   skills, declare them so the daemon can validate them. Enumerate what's actually
+   available:
+   - **Project skills** — bare directory names under the repo's `.claude/skills/`
+     that contain a `SKILL.md` (e.g. `react-revamp`):
+     `ls -d .claude/skills/*/ 2>/dev/null | xargs -n1 basename` (keep only those
+     with a `SKILL.md`).
+   - **Plugin skills** — `<plugin>:<skill>` ids from the local plugin cache:
+     `find ~/.claude/plugins/cache -name SKILL.md` → the id is
+     `<plugin>:<skill>` from `.../<plugin>/<version>/skills/<skill>/SKILL.md`.
+   Emit an **uncommented** `skills: <a>, <b>` line in `## Agent Configuration`
+   listing only names you confirmed exist (bare = project, `plugin:skill` =
+   plugin). Omit the line entirely if no skill is clearly warranted — it is
+   optional. **Never invent a name**: the daemon HARD-BLOCKS an issue whose
+   declared skill is unresolvable (relabels `agent-blocked`, unassigns), so a
+   typo'd skill stalls the issue. `validate_issue.py` warns loudly about any
+   declared skill it can't find locally.
+5c. **Suggest a sub-agent type (optional).** If the agent should delegate
+   implementation to a specific Claude Code **sub-agent type**, declare it with an
+   **uncommented** `agent-type: <name>` line in `## Agent Configuration`. Valid
+   names come from the target repo's `.claude/agents/<name>.md` (e.g. `aware-payroll-v2/pps-web`
+   ships `web-implement`, `web-polish`, `web-pre-commit`, `web-test`), the agent's
+   own user/plugin agents, or a Claude Code built-in (`general-purpose`, `Explore`,
+   `Plan`, …). Steering is **best-effort** — it only takes effect if the agent
+   chooses to delegate — but the **name is validated pre-claim exactly like
+   `skills:`**: the daemon HARD-BLOCKS the issue (relabels `agent-blocked`,
+   unassigns) if the name resolves to no known sub-agent. **Never invent a name**;
+   `validate_issue.py` warns loudly about an `agent-type:` it can't find locally.
+   Omit the line for no steering (unchanged).
 6. **Draft the full body** against the template:
    - Bugs → fill **Reproduction** (steps, expected, actual, logs, env).
    - Features/refactors → fill **Design** (concrete approach, files/APIs to touch),
@@ -129,6 +158,9 @@ detect it at post time and offer two options:
    section ask the user a targeted question (or draft it), then re-validate. Loop
    until `ok`. The gate only checks presence/non-emptiness — *also* self-check that
    Acceptance Criteria and Test Cases are **meaningful**, not empty placeholders.
+   If it prints a `⚠️  WARNING: declared skill(s) not found` line, a `skills:`
+   entry is unresolvable — fix or drop it (the daemon would otherwise
+   `agent-blocked` the issue). The warning never changes the exit code.
 8. **Preview + approve.** Show the full rendered issue, the target project, and the
    label (`agent-ready`). Get explicit approval; apply any edits, then re-validate.
 9. **Post.**
@@ -213,3 +245,32 @@ the project default branch.
   switches the agent to multi-repo mode. Only include it for true submodule work.
 - **Posting to an unassigned project.** If `post_issue.py` exits 3, the project
   isn't wired to an agent — assign it first; don't force the label.
+
+## Phased / multi-agent tasks
+
+Writing a multi-phase plan in prose is natural and **supported**: the daemon passes
+the prose through and the **main Claude agent orchestrates** the sequence at
+runtime, delegating to sub-agents that exist in the target repo's
+`.claude/agents/`. Each sub-agent carries its own model, effort, and tools.
+
+**To write a phased plan:** reference sub-agents by name in `## Design` or
+`## Agent Configuration` (e.g. `use \`web-implement\` to build, run
+\`web-pre-commit\` to gate`). **Confirm each referenced agent exists** in the
+target repo's `.claude/agents/` before posting — a prose reference is not
+validated by the daemon, so a nonexistent name silently falls back to manual
+implementation (the #299 bug).
+
+**Prefer the validated directives** when a single agent or skill covers the whole
+task: `agent-type: web-implement` or `skills: web-implement` in
+`## Agent Configuration`. The daemon validates existence pre-claim; a typo parks
+the issue `agent-blocked` rather than silently degrading.
+
+**Different models per phase?** The daemon runs **one model per issue**. Split
+into separate issues (one per model-distinct phase) connected by `Depends-on:`
+or GitLab blocking issues. If all phases use the same model, a single issue
+with a prose plan is correct.
+
+`validate_issue.py` emits an advisory warning (never blocks) when it detects a
+phased / delegation plan that may assume daemon-orchestrated phase switching.
+
+Full guidance: [developer-manual §2.14 — Phased / multi-agent work](../../../docs/developer-manual.md#214-phased--multi-agent-work).
