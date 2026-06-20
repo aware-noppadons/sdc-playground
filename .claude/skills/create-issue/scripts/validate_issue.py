@@ -325,9 +325,7 @@ def detect_phased_pattern(body: str) -> bool:
         return True
     if len(deleg_hits) >= 2:
         return True
-    if phase_nums and deleg_hits:
-        return True
-    return False
+    return bool(phase_nums and deleg_hits)
 
 
 def main(argv: list[str]) -> int:
