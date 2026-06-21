@@ -11,10 +11,11 @@
 -->
 
 ## Type
-<!-- bug | feature | refactor | chore | research
+<!-- bug | feature | refactor | chore | research | test
      Stamped on the issue as a scoped `type::<x>` label (e.g. type::bug) when
      filed via /create-issue, so the operator's Kanban board can filter by type.
-     Pick exactly one of: bug | feature | refactor | chore | research.
+     Pick exactly one of: bug | feature | refactor | chore | research | test.
+     (test = writing automated test scripts/cases)
      Note: the Type does NOT set the model — see Agent Configuration below. -->
 
 ---

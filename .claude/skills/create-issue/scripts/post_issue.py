@@ -17,7 +17,7 @@ quick-action lines) on the clipboard for pasting — no token, no URL-length wal
 
 CLI:
   post_issue.py --title T --body-file FILE [--label L ...]
-                [--type {bug,feature,refactor,chore,research}] [--repo R]
+                [--type {bug,feature,refactor,chore,research,test}] [--repo R]
                 [--method {glab,browser}] [--dry-run] [--no-ready]
                 [--skip-label-check]
 
@@ -47,7 +47,7 @@ AGENT_LABELS = [
 # Issue-type vocabulary (board v2 §2c). The skill infers one of these (SKILL.md
 # §5) and passes it via --type; we stamp it as a scoped `type::<x>` label so the
 # board's type filter can use it. Same vocabulary as the template's ## Type field.
-ISSUE_TYPES = ["bug", "feature", "refactor", "chore", "research"]
+ISSUE_TYPES = ["bug", "feature", "refactor", "chore", "research", "test"]
 
 
 def build_argv(

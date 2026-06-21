@@ -76,12 +76,20 @@ detect it at post time and offer two options:
      (→ Assumption)?"*
    - **Not a gate:** the pre-pass enriches the draft only; `validate_issue.py`
      remains the sole hard gate.
-5. **Infer the Type** (`bug | feature | refactor | chore | research`). The Type is
-   stamped on the issue as a scoped `type::<x>` label at post time (pass
+5. **Infer the Type** (`bug | feature | refactor | chore | research | test`). The
+   Type is stamped on the issue as a scoped `type::<x>` label at post time (pass
    `--type <inferred>` to `post_issue.py`, step 9), so the operator board's type
    filter can use it. (The type labels are provisioned on the project at assign
    time alongside the `agent-*` labels.) The Type does **not** set the model —
-   see the model-suggestion step below.
+   see the model-suggestion step below. Types at a glance:
+   - `bug` — a defect; something behaves incorrectly.
+   - `feature` — new capability or user-facing functionality.
+   - `refactor` — internal restructure with no behavior change.
+   - `chore` — maintenance / housekeeping (deps, config, cleanup).
+   - `research` — investigation / spike to answer an open question.
+   - `test` — writing automated test scripts/cases (use this when the deliverable
+     is *tests*, not application code — e.g. adding a test suite, automating
+     existing Given/When/Then cases, implementing E2E scenarios).
 5a. **Suggest a model (highly recommended).** Assess the task and recommend a
    `model:` for the agent:
    - **`opus`** — heavy, architectural, or hard-to-debug work (complex refactors,
@@ -129,6 +137,13 @@ detect it at post time and offer two options:
    - Features/refactors → fill **Design** (concrete approach, files/APIs to touch),
      **Edge Cases**, and — when the pre-pass surfaced ≥1 assumption — **Assumptions**
      (between Design and Edge Cases; omit entirely if none).
+   - **Tests** (`type::test`) → fill **Design** with the test architecture: which
+     framework, where test files live, fixtures/mocks needed, and the Gherkin runner
+     (if applicable). **Acceptance Criteria** = "each case has a passing automated
+     test; coverage target met". **Test Cases** = the individual scenarios to
+     automate, written as Given/When/Then. In `## Agent Configuration` recommend
+     `skills: superpowers:test-driven-development`; for web/E2E work also add
+     `webapp-testing` and/or `playwright-generate-test` if available.
    - Always → **Summary**, **Context**, **Acceptance Criteria** (checkable, real),
      **Test Cases** (`Given / When / Then`, real), **Codebase Hints** (actual
      files/patterns), **Constraints**, **Dependencies** as relevant.
@@ -195,7 +210,7 @@ detect it at post time and offer two options:
 | Post (glab, primary) | `python3 scripts/post_issue.py --title … --body-file … --type <type> [--repo …]` (add `--no-ready` to skip the label) |
 | Post (browser fallback) | `python3 scripts/post_issue.py --title … --body-file … --type <type> [--repo …] --method browser` |
 
-`--type` is one of `bug | feature | refactor | chore | research` (the inferred Type); it stamps a scoped `type::<x>` label that joins `agent-ready` and, on the browser fallback, rides the `/label` paste lines.
+`--type` is one of `bug | feature | refactor | chore | research | test` (the inferred Type); it stamps a scoped `type::<x>` label that joins `agent-ready` and, on the browser fallback, rides the `/label` paste lines.
 
 **Prerequisite gate** (mirrored by `validate_issue.py`): a non-empty `## Design`
 *or* an uncommented `design-mode: agent-designs`; a non-empty
