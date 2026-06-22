@@ -1,0 +1,1 @@
+This GitHub project was discovered and worked by a MIXED-forge SDC slot (agent-01), validating that per-project forge-dispatch correctly routes GitHub projects through the GitHub forge using the borrowed PAT, while GitLab projects use the GitLab forge — neither misrouted to the other.
