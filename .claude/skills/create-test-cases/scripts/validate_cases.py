@@ -202,11 +202,19 @@ def parse_catalog(text: str) -> list[Scenario]:
     texts, and whether an Examples: table followed an outline. Lines it does not
     recognise (Feature, Background, table rows, doc-strings, comments, blanks)
     are skipped — they do not affect the structural checks.
+
+    Background: steps are collected into background_keywords / background_then_texts
+    and prepended to every scenario in the same feature (standard Gherkin semantics).
+    background_keywords is reset on each Feature: header so steps never bleed
+    across feature boundaries.
     """
     scenarios: list[Scenario] = []
     pending_tags: list[str] = []
     current: Scenario | None = None
     last_primary: str | None = None  # for And/But inheritance
+    in_background: bool = False
+    background_keywords: list[str] = []
+    background_then_texts: list[str] = []
 
     for idx, raw in enumerate(text.splitlines(), start=1):
         line = raw.rstrip("\n")
@@ -224,9 +232,13 @@ def parse_catalog(text: str) -> list[Scenario]:
                 line_no=idx,
                 tags=pending_tags,
             )
+            # Prepend background steps to every scenario in this feature.
+            current.keywords.extend(background_keywords)
+            current.then_texts.extend(background_then_texts)
             scenarios.append(current)
             pending_tags = []
             last_primary = None
+            in_background = False
             continue
 
         if _EXAMPLES_RE.match(line):
@@ -234,14 +246,24 @@ def parse_catalog(text: str) -> list[Scenario]:
                 current.has_examples = True
             continue
 
-        if _FEATURE_RE.match(line) or _BACKGROUND_RE.match(line):
-            # A Feature/Background ends any tag run that wasn't for a scenario.
+        if _FEATURE_RE.match(line):
+            # A new Feature resets background and any pending tag run.
             pending_tags = []
             last_primary = None
+            in_background = False
+            background_keywords = []
+            background_then_texts = []
+            continue
+
+        if _BACKGROUND_RE.match(line):
+            # Background: ends any pending tag run; subsequent steps are background steps.
+            pending_tags = []
+            last_primary = None
+            in_background = True
             continue
 
         m_step = _STEP_RE.match(line)
-        if m_step and current is not None:
+        if m_step:
             kw = m_step.group(1)
             if kw in ("And", "But"):
                 effective = last_primary
@@ -249,9 +271,14 @@ def parse_catalog(text: str) -> list[Scenario]:
                 effective = kw
                 last_primary = kw
             if effective is not None:
-                current.keywords.append(effective)
-                if effective == "Then":
-                    current.then_texts.append(m_step.group("text").strip())
+                if in_background and current is None:
+                    background_keywords.append(effective)
+                    if effective == "Then":
+                        background_then_texts.append(m_step.group("text").strip())
+                elif current is not None:
+                    current.keywords.append(effective)
+                    if effective == "Then":
+                        current.then_texts.append(m_step.group("text").strip())
             continue
 
         # A tag line attaches to the NEXT scenario.
@@ -286,7 +313,8 @@ def _manifest_confidence(manifest: dict) -> dict:
     }
 
 
-def validate(catalog_text: str, manifest: dict, min_coverage: float = 0.8) -> Result:
+def validate(catalog_text: str, manifest: dict, min_coverage: float = 0.8,
+             scope_ids: list[str] | None = None) -> Result:
     """Run the structural HARD gate + ADVISORY checks; return a Result."""
     hard: list[str] = []
     warn: list[str] = []
@@ -304,6 +332,16 @@ def validate(catalog_text: str, manifest: dict, min_coverage: float = 0.8) -> Re
     confidences = _manifest_confidence(manifest)
     known_ids = set(manifest_ids)
     referenced_known: set[str] = set()
+
+    # ---- SCOPE filter: narrow the coverage denominator when requested. ----
+    # Confabulation check and low-confidence advisories still use the full
+    # known_ids set; only the RTM coverage denominator is scoped.
+    if scope_ids is not None:
+        scope_set = set(scope_ids)
+        unknown_scope = scope_set - known_ids
+        for sid in sorted(unknown_scope):
+            warn.append(f"--scope id '{sid}' is not present in the manifest (possible typo).")
+        manifest_ids = [mid for mid in manifest_ids if mid in scope_set]
 
     for scn in scenarios:
         label = f"Scenario '{scn.name}' (line {scn.line_no})"
@@ -454,12 +492,19 @@ def main(argv: list[str]) -> int:
         help="RTM coverage threshold below which a warning is emitted "
              "(advisory only; default 0.8)",
     )
+    parser.add_argument(
+        "--scope", default=None,
+        help="Comma-separated manifest section ids to compute coverage over "
+             "(default: all manifest ids). Use when validating a catalog for a "
+             "scoped feature subset of a larger manual.",
+    )
     args = parser.parse_args(argv[1:])
 
     catalog_text = Path(args.catalog).read_text(encoding="utf-8")
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
 
-    result = validate(catalog_text, manifest, min_coverage=args.min_coverage)
+    scope_ids = [s.strip() for s in args.scope.split(",") if s.strip()] if args.scope else None
+    result = validate(catalog_text, manifest, min_coverage=args.min_coverage, scope_ids=scope_ids)
     print(json.dumps(result.to_dict()))
     return 0 if result.ok else 1
 

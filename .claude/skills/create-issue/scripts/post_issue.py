@@ -29,9 +29,12 @@ Exit codes: 0 ok / 2 usage / 3 project-not-set-up / 4 glab-unavailable.
 
 import argparse
 import json
+import random
+import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 
 AGENT_LABELS = [
@@ -48,6 +51,66 @@ AGENT_LABELS = [
 # §5) and passes it via --type; we stamp it as a scoped `type::<x>` label so the
 # board's type filter can use it. Same vocabulary as the template's ## Type field.
 ISSUE_TYPES = ["bug", "feature", "refactor", "chore", "research", "test"]
+
+# Labels that post_issue.py is permitted to emit. Mirrors the frozenset pattern
+# in validate_issue.py:_BUILTIN_AGENT_TYPES. Any --label value outside this set
+# is a usage error (exit 2) — prevents injected label strings from riding into
+# the glab argv and the browser paste-body's /label quick-actions.
+ALLOWED_LABELS: frozenset = frozenset(AGENT_LABELS + [f"type::{t}" for t in ISSUE_TYPES])
+
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_QA_RE = re.compile(r"^(\s*)/(\S)")
+_ISSUE_URL_RE = re.compile(r"https?://\S+/-/issues/\d+")
+
+_RETRY_MAX_ATTEMPTS = 4
+_RETRY_BASE_DELAY = 2.0
+
+
+def validate_labels(labels: list) -> list:
+    """Return the labels not present in ALLOWED_LABELS."""
+    return [label for label in labels if label not in ALLOWED_LABELS]
+
+
+def neutralize_quick_actions(body: str) -> str:
+    """Rewrite lines whose first non-whitespace character is '/' (outside fenced
+    code blocks) by replacing the leading slash with its HTML numeric entity
+    (&#47;) so GitLab renders it literally and never executes it as a quick-action.
+
+    Lines inside ``` / ~~~ fences are left unchanged (a /path inside a shell
+    snippet must not be mangled). The function is idempotent: &#47; does not
+    start with '/' so a second pass is a no-op.
+    """
+    in_fence = False
+    fence_marker = ""
+    result = []
+
+    for line in body.splitlines(keepends=True):
+        stripped = line.rstrip("\r\n")
+        ending = line[len(stripped):]
+
+        fence_m = _FENCE_RE.match(stripped)
+        if fence_m:
+            marker = fence_m.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif stripped.strip().startswith(fence_marker):
+                in_fence = False
+                fence_marker = ""
+            result.append(line)
+            continue
+
+        if not in_fence:
+            qa_m = _QA_RE.match(stripped)
+            if qa_m:
+                prefix = qa_m.group(1)
+                rest = stripped[len(prefix) + 1:]
+                result.append(prefix + "&#47;" + rest + ending)
+                continue
+
+        result.append(line)
+
+    return "".join(result)
 
 
 def build_argv(
@@ -69,6 +132,55 @@ def parse_label_names(output: str) -> set[str]:
 
 def _default_run(cmd: list[str]) -> str:
     return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+
+
+def _run_with_retry(
+    cmd: list[str],
+    run=_default_run,
+    *,
+    max_attempts: int = _RETRY_MAX_ATTEMPTS,
+    base_delay: float = _RETRY_BASE_DELAY,
+) -> str:
+    """Run cmd; retry up to max_attempts times on exit-code 1 with '429' in stderr."""
+    for attempt in range(max_attempts):
+        try:
+            return run(cmd)
+        except subprocess.CalledProcessError as e:
+            is_429 = e.returncode == 1 and "429" in (e.stderr or "")
+            if not is_429 or attempt == max_attempts - 1:
+                raise
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+            print(
+                f"warning: 429 rate-limited; retrying in {delay:.1f}s "
+                f"(attempt {attempt + 1}/{max_attempts})",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def _load_checkpoint(work_dir: str) -> dict:
+    """Load <work-dir>/posted.json; return {} on missing or malformed file."""
+    path = f"{work_dir}/posted.json"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.loads(fh.read())
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        print(f"warning: could not read checkpoint {path} ({exc}); proceeding", file=sys.stderr)
+        return {}
+
+
+def _save_checkpoint(work_dir: str, checkpoint: dict) -> None:
+    """Atomically write checkpoint dict to <work-dir>/posted.json."""
+    path = f"{work_dir}/posted.json"
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(checkpoint))
+        fh.flush()
+    import os
+    os.replace(tmp_path, path)
 
 
 def glab_status(run=_default_run, path_check=shutil.which) -> bool:
@@ -286,6 +398,17 @@ def main(
         "--no-ready", action="store_true", help="post without the agent-ready label"
     )
     ap.add_argument("--skip-label-check", action="store_true")
+    ap.add_argument(
+        "--skip-auth-check",
+        action="store_true",
+        help="skip the glab auth status probe (use after first post in a fan-out loop)",
+    )
+    ap.add_argument(
+        "--work-dir",
+        default=None,
+        help="directory holding the checkpoint file posted.json; "
+             "skip features already posted; write URL on success",
+    )
     args = ap.parse_args(argv[1:])
 
     with open(args.body_file, encoding="utf-8") as fh:
@@ -304,6 +427,24 @@ def main(
         if type_label not in labels:
             labels = [*labels, type_label]
 
+    # Label allowlist guard: reject any non-allowlisted label before touching glab
+    # or the browser path. Mirrors validate_issue.py's _BUILTIN_AGENT_TYPES check.
+    rejected = validate_labels(labels)
+    if rejected:
+        listed = ", ".join(repr(l) for l in rejected)
+        allowed = ", ".join(sorted(ALLOWED_LABELS))
+        print(
+            f"error: non-allowlisted label(s): {listed}. "
+            f"Allowed labels: {allowed}",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Neutralise any GitLab quick-actions in the source body before it reaches
+    # glab or the browser paste-body. paste_body()'s own /label lines are appended
+    # AFTER this point, so they remain live.
+    body = neutralize_quick_actions(body)
+
     glab_argv = build_argv(args.title, body, labels, args.repo)
 
     # --dry-run short-circuits before any availability check or network call.
@@ -317,8 +458,16 @@ def main(
             args, body, labels, _remote_reader, _clipboard, _opener
         )
 
+    # Checkpoint skip: if this title was already posted successfully, exit 0.
+    checkpoint: dict = {}
+    if args.work_dir is not None:
+        checkpoint = _load_checkpoint(args.work_dir)
+        if args.title in checkpoint:
+            print(f"skipping {args.title!r} (already posted: {checkpoint[args.title]})")
+            return 0
+
     # glab path: pre-detect availability + auth; exit 4 (don't post, don't fall back).
-    if not _glab_status_fn():
+    if not args.skip_auth_check and not _glab_status_fn():
         print(
             "glab is not installed or not authenticated.\n\n"
             "To install: https://gitlab.com/gitlab-org/cli/-/releases "
@@ -351,7 +500,7 @@ def main(
             return 3
 
     try:
-        out = _run(glab_argv)
+        out = _run_with_retry(glab_argv, run=_run)
     except subprocess.CalledProcessError as e:
         # glab create failed: surface its streams and exit with its return code.
         if e.stdout:
@@ -359,6 +508,13 @@ def main(
         if e.stderr:
             sys.stderr.write(e.stderr)
         return e.returncode
+
+    if args.work_dir is not None:
+        m = _ISSUE_URL_RE.search(out or "")
+        url = m.group(0) if m else "posted"
+        checkpoint[args.title] = url
+        _save_checkpoint(args.work_dir, checkpoint)
+
     if out:
         sys.stdout.write(out)
     return 0

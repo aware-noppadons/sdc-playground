@@ -22,13 +22,17 @@ canonical schema for `manifest.json`. Each *source* maps to a manifest entry of:
           "id": "sec-3-2",
           "locator": "#sec-3-2",
           "title": "Creating an account",
-          "text": "…normalized markdown for this section…",
           "confidence": "high|medium|low",
           "has_images": false,
           "images": ["images/sec-3-2-fig1.png"]
         }
       ]
     }
+
+NOTE: `"text"` is intentionally absent from manifest sections. Agents read section
+text from `normalized.md` via the `"locator"` anchor — embedding it in the manifest
+would duplicate the full corpus and double downstream token costs for every DRAFT/REVIEW
+sub-agent call.
 
 When a single source is ingested the manifest top-level *is* that entry (so it
 matches CONTRACT 1 byte-for-byte). When several sources are ingested the top-level
@@ -53,10 +57,66 @@ import json
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable, Optional
+
+# ---------------------------------------------------------------------------
+# Hostile-document hardening (issue #92). Ingested bytes are UNTRUSTED — this
+# skill ships into every onboarded repo, so a crafted DOCX/XLSX/PPTX/PDF must
+# never read local files (XXE), make outbound requests (SSRF), or OOM the host.
+# All of the following is OPTIONAL: with none of the heavy libs installed (the
+# real env) these hooks are inert and the module still imports + runs the `md`
+# path. NO hard dependency is introduced (CONTRACT-1 docstring guidance).
+# ---------------------------------------------------------------------------
+try:  # defusedxml hardens the *stdlib* XML parsers (etree/minidom/sax).
+    import warnings as _warnings
+
+    # defuse_stdlib() and the (deprecated) defusedxml.lxml hook emit
+    # DeprecationWarnings from defusedxml's own internals; keep the skill's
+    # operator-facing output clean without masking warnings from our own code.
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", DeprecationWarning)
+        import defusedxml  # type: ignore
+
+        defusedxml.defuse_stdlib()
+        try:
+            from defusedxml.lxml import _etree  # noqa: F401  # ensure the lxml hook imports
+        except Exception:
+            pass
+    _XML_HARDENED = True
+except Exception:
+    _XML_HARDENED = False
+
+
+def _harden_lxml() -> None:
+    """Make the process-wide default lxml parser refuse DTDs / external entities
+    / network access. No-op if lxml is absent.
+
+    defusedxml.defuse_stdlib() does NOT touch the lxml C parser, and python-docx
+    / openpyxl / mammoth all parse OOXML inner XML with lxml. Setting a safe
+    default parser neutralizes XXE (resolve_entities=False), SSRF-via-entity
+    (no_network=True), and billion-laughs expansion (huge_tree=False) for any
+    lxml call that does not pass its own parser. Idempotent.
+    """
+    try:
+        from lxml import etree  # type: ignore
+    except Exception:
+        return
+    safe = etree.XMLParser(
+        resolve_entities=False,
+        no_network=True,
+        dtd_validation=False,
+        load_dtd=False,
+        huge_tree=False,
+    )
+    etree.set_default_parser(safe)
+
+
+_harden_lxml()
+
 
 # ---------------------------------------------------------------------------
 # Confidence / ingester constants (CONTRACT 1 vocabulary)
@@ -71,6 +131,55 @@ PDF_TEXT_DENSITY_FLOOR = 32
 
 # Cap a degraded raw-fallback section's inlined text so the manifest stays small.
 RAW_TEXT_PREVIEW_LIMIT = 4000
+
+# Maximum non-empty rows retained per XLSX worksheet (data rows, excluding the header).
+# iter_rows(values_only=True) is a streaming generator; this cap ensures we never
+# materialise more than XLSX_ROW_CAP data rows in RAM at once for a large test matrix.
+# Tune (with a note) only if a legitimate real document trips this limit.
+XLSX_ROW_CAP = 10_000
+
+# ---------------------------------------------------------------------------
+# Hostile-archive / PDF bounds (issue #92). Values chosen to reject an obvious
+# bomb while comfortably passing an ordinary manual/test-plan:
+#   - real-world OOXML files have a few hundred parts at most → 2000 is generous.
+#   - 512 MiB inflated and a 200:1 ratio flag decompression bombs without
+#     tripping on normal image-heavy decks.
+#   - 500 pages / 25 MP-per-page bound the PDF rasterization work per document.
+# Tune (with a note) only if a benign real doc trips a cap.
+# ---------------------------------------------------------------------------
+MAX_ARCHIVE_ENTRIES = 2000          # OOXML rarely exceeds a few hundred parts
+MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024   # 512 MiB total inflated
+MAX_COMPRESSION_RATIO = 200         # inflated/compressed; flags zip bombs
+MAX_PDF_PAGES = 500                 # page-count ceiling for text + rasterization
+MAX_PIXMAP_PIXELS = 25_000_000      # ~25 MP/page ceiling (e.g. 5000x5000)
+
+
+class _UnsafeArchive(Exception):
+    """Raised when an OOXML archive trips a zip-bomb guard. ingest_one's
+    ``except Exception`` converts this into a clean raw-fallback degrade."""
+
+
+def _assert_safe_ooxml(path: pathlib.Path) -> None:
+    """Reject a hostile OOXML zip *before* any parser decompresses it.
+
+    Uses only the central-directory declared sizes (cheap, no decompression):
+    entry count, total declared-uncompressed size, and inflated/compressed
+    ratio. Raises ``_UnsafeArchive`` on a trip; a non-zip is left alone so the
+    real parser raises its own error (also caught → degrade)."""
+    import zipfile
+
+    if not zipfile.is_zipfile(str(path)):
+        return  # not a zip → let the lib raise its own (caught → degrade)
+    with zipfile.ZipFile(str(path)) as zf:
+        infos = zf.infolist()
+        if len(infos) > MAX_ARCHIVE_ENTRIES:
+            raise _UnsafeArchive(f"too many entries: {len(infos)}")
+        total_unc = sum(i.file_size for i in infos)          # declared uncompressed
+        total_comp = sum(i.compress_size for i in infos) or 1
+        if total_unc > MAX_UNCOMPRESSED_BYTES:
+            raise _UnsafeArchive(f"uncompressed size {total_unc} over cap")
+        if total_unc / total_comp > MAX_COMPRESSION_RATIO:
+            raise _UnsafeArchive(f"compression ratio {total_unc / total_comp:.0f} over cap")
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +204,18 @@ class Section:
             "images": list(self.images),
         }
 
+    def to_index_dict(self) -> dict:
+        """Manifest-safe serialisation: omits 'text' to avoid duplicating the corpus.
+        Agents read section text from normalized.md via the 'locator' anchor."""
+        return {
+            "id": self.id,
+            "locator": "#" + self.id,
+            "title": self.title,
+            "confidence": self.confidence,
+            "has_images": bool(self.images),
+            "images": list(self.images),
+        }
+
 
 @dataclass
 class SourceResult:
@@ -112,7 +233,7 @@ class SourceResult:
             "format": self.fmt,
             "ingested_with": self.ingested_with,
             "needs_multimodal_read": self.needs_multimodal_read,
-            "sections": [s.to_dict() for s in self.sections],
+            "sections": [s.to_index_dict() for s in self.sections],
         }
 
 
@@ -263,6 +384,7 @@ def ingest_md(path: pathlib.Path, uniq: _Uniquifier, images_dir: pathlib.Path) -
 
 def ingest_docx(path: pathlib.Path, uniq: _Uniquifier, images_dir: pathlib.Path) -> SourceResult:
     """DOCX → markdown. Try python-docx, then mammoth, then a pandoc subprocess."""
+    _assert_safe_ooxml(path)  # zip-bomb guard before any OOXML parse
     # 1) python-docx (paragraph + heading-style aware).
     try:
         import docx  # type: ignore  # python-docx
@@ -311,16 +433,30 @@ def ingest_xlsx(path: pathlib.Path, uniq: _Uniquifier, images_dir: pathlib.Path)
     """XLSX → sections. If a sheet looks like a test matrix (header row with
     ID/Step/Expected-like columns) emit one section per data row (`row-<n>`);
     otherwise emit one section per sheet."""
+    _assert_safe_ooxml(path)  # zip-bomb guard before any OOXML parse
     import openpyxl  # type: ignore  # raises ImportError → degrade
 
     wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
     sections: list = []
     for ws in wb.worksheets:
-        rows = [
-            [("" if c is None else str(c)) for c in row]
-            for row in ws.iter_rows(values_only=True)
-        ]
-        rows = [r for r in rows if any(cell.strip() for cell in r)]
+        rows = []
+        _capped = False
+        for _raw_row in ws.iter_rows(values_only=True):
+            # Cap check before processing: stop when we have more than XLSX_ROW_CAP
+            # non-empty rows in rows (header + XLSX_ROW_CAP data rows = XLSX_ROW_CAP
+            # sections for a test-matrix sheet).
+            if len(rows) > XLSX_ROW_CAP:
+                _capped = True
+                break
+            converted = [("" if c is None else str(c)) for c in _raw_row]
+            if any(cell.strip() for cell in converted):
+                rows.append(converted)
+        if _capped:
+            print(
+                f"  warning: {path.name}: worksheet '{ws.title}' exceeds {XLSX_ROW_CAP} rows; "
+                f"truncated to first {XLSX_ROW_CAP} non-empty rows",
+                file=sys.stderr,
+            )
         if not rows:
             continue
         header = rows[0]
@@ -360,8 +496,12 @@ def ingest_pdf(path: pathlib.Path, uniq: _Uniquifier, images_dir: pathlib.Path) 
     try:
         import pdfplumber  # type: ignore
 
-        pages_text = []
         with pdfplumber.open(str(path)) as pdf:
+            # Page-count cap: bail (degrade) before extracting text from every
+            # page of a million-page DoS PDF.
+            if len(pdf.pages) > MAX_PDF_PAGES:
+                return _raw_fallback(path, uniq, fmt="pdf")
+            pages_text = []
             for page in pdf.pages:
                 pages_text.append(page.extract_text() or "")
         used = "pdfplumber"
@@ -373,8 +513,10 @@ def ingest_pdf(path: pathlib.Path, uniq: _Uniquifier, images_dir: pathlib.Path) 
         try:
             import fitz  # type: ignore  # PyMuPDF
 
-            pages_text = []
             with fitz.open(str(path)) as doc:
+                if doc.page_count > MAX_PDF_PAGES:
+                    return _raw_fallback(path, uniq, fmt="pdf")
+                pages_text = []
                 for page in doc:
                     pages_text.append(page.get_text() or "")
             used = "pymupdf"
@@ -391,12 +533,18 @@ def ingest_pdf(path: pathlib.Path, uniq: _Uniquifier, images_dir: pathlib.Path) 
 
     if not near_zero:
         # Good text layer → medium confidence, one section per page.
+        # Render page images too: tables/figures in a text-layer PDF may still
+        # require visual inspection when pdfplumber extracts garbled tab-noise.
+        rendered = _render_pdf_images(path, images_dir)
         sections = []
         for i, txt in enumerate(pages_text, start=1):
+            img = [rendered[i - 1]] if rendered and i <= len(rendered) else []
             sid = uniq.make(f"page-{i}")
             body = f"## Page {i}\n\n{txt.strip()}"
-            sections.append(Section(id=sid, title=f"Page {i}", text=body, confidence=MEDIUM))
-        return SourceResult(path.name, "pdf", used, False, sections)
+            sections.append(
+                Section(id=sid, title=f"Page {i}", text=body, confidence=MEDIUM, images=img)
+            )
+        return SourceResult(path.name, "pdf", used, bool(rendered), sections)
 
     # Near-zero text density → multimodal read required. Try to render images.
     rendered = _render_pdf_images(path, images_dir)
@@ -417,6 +565,7 @@ def ingest_pdf(path: pathlib.Path, uniq: _Uniquifier, images_dir: pathlib.Path) 
 def ingest_pptx(path: pathlib.Path, uniq: _Uniquifier, images_dir: pathlib.Path) -> SourceResult:
     """PPTX → one section per slide (title + body text + notes). Slide decks are
     fragmentary → confidence low, needs_multimodal_read true."""
+    _assert_safe_ooxml(path)  # zip-bomb guard before any OOXML parse
     from pptx import Presentation  # type: ignore  # python-pptx; ImportError → degrade
 
     prs = Presentation(str(path))
@@ -524,8 +673,13 @@ def _pandoc_to_markdown(path: pathlib.Path) -> Optional[str]:
     import subprocess
 
     try:
+        # --sandbox: pandoc readers cannot touch the filesystem (no file-embed /
+        # include directives on attacker bytes). --from docx: pin the reader so
+        # the format is NOT sniffed from the attacker-controlled extension. argv
+        # stays a list with no shell. _pandoc_to_markdown is only called from
+        # ingest_docx, so docx is the correct reader.
         proc = subprocess.run(
-            [pandoc, str(path), "-t", "gfm", "--wrap=none"],
+            [pandoc, "--sandbox", "--from", "docx", "-t", "gfm", "--wrap=none", str(path)],
             capture_output=True,
             text=True,
             timeout=120,
@@ -549,7 +703,16 @@ def _render_pdf_images(path: pathlib.Path, images_dir: pathlib.Path) -> list:
         images_dir.mkdir(parents=True, exist_ok=True)
         stem = slugify(path.stem)
         with fitz.open(str(path)) as doc:
+            # Page-count cap: never rasterize a million-page DoS PDF.
+            if doc.page_count > MAX_PDF_PAGES:
+                return rels
             for i, page in enumerate(doc, start=1):
+                # Pixmap-dimension cap: at the default 72-dpi mapping 1pt→1px, so
+                # the pixmap area is page.rect.width * height. Skip any page whose
+                # render would exceed MAX_PIXMAP_PIXELS (e.g. a hostile MediaBox).
+                rect = page.rect
+                if rect.width * rect.height > MAX_PIXMAP_PIXELS:
+                    continue
                 pix = page.get_pixmap()
                 name = f"{stem}-page-{i}.png"
                 pix.save(str(images_dir / name))
@@ -557,6 +720,32 @@ def _render_pdf_images(path: pathlib.Path, images_dir: pathlib.Path) -> list:
     except Exception:
         return rels
     return rels
+
+
+def _is_git_tracked(path: pathlib.Path) -> bool:
+    """True if `path` (or anything inside it) is tracked by git.
+
+    Uses `git ls-files --error-unmatch` which exits 0 when the path (or any
+    file under it) is tracked, and non-zero otherwise. Returns False when git
+    is not on PATH so the guard silently passes in non-git environments.
+
+    Runs git from the nearest existing ancestor of `path` so that git
+    auto-discovers the correct repository regardless of the process CWD.
+    """
+    path = pathlib.Path(path).absolute()
+    # Find the nearest existing ancestor to use as the git working directory.
+    cwd = path if path.is_dir() else path.parent
+    while not cwd.exists() and cwd != cwd.parent:
+        cwd = cwd.parent
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(path)],
+            capture_output=True,
+            cwd=str(cwd),
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False  # git not available → no guard
 
 
 def _raw_fallback(path: pathlib.Path, uniq: _Uniquifier, fmt: str) -> SourceResult:
@@ -659,6 +848,11 @@ def ingest(sources: list, out_dir) -> dict:
     manifest.json. Returns the manifest dict. Pure-side-effect free apart from
     writing into out_dir; never raises on bad source content."""
     out = pathlib.Path(out_dir)
+    if _is_git_tracked(out):
+        sys.exit(
+            f"ERROR: --out '{out}' is already tracked by git. Use a throwaway/gitignored\n"
+            f"directory (e.g. /tmp/tc-work or a path listed in .gitignore)."
+        )
     images_dir = out / "images"
     out.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -688,7 +882,7 @@ def _build_manifest(results: list) -> dict:
     source_dicts = [r.to_dict() for r in results]
     all_sections: list = []
     for r in results:
-        all_sections.extend(s.to_dict() for s in r.sections)
+        all_sections.extend(s.to_index_dict() for s in r.sections)
 
     needs_mm = any(r.needs_multimodal_read for r in results)
 

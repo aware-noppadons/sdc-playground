@@ -71,6 +71,12 @@ _DELEGATION_RE = re.compile(
     r"(?i)(?:use\s+`[^`]+`\s+to\b|run\s+`[^`]+`\s+to\b|delegate\s+to\s+`[^`]+`)"
 )
 
+# First-class per-phase config (issue #40). A ## Phases section with ≥1
+# ### Phase sub-block is the SUPPORTED, daemon-parsed format; its per-phase
+# skills:/agent-type: are validated (advisory) just like the issue-level ones.
+# Mirrors daemon/sdc_daemon/worker.parse_phases. Standalone copy (offline skill).
+_PHASE_HEADING_RE = re.compile(r"^\s{0,3}#{3,6}\s+(.+?)\s*$", re.MULTILINE)
+
 
 @dataclass
 class Result:
@@ -205,14 +211,69 @@ def _safe_iterdir(path: Path) -> list[Path]:
         return []
 
 
+def _phases_region(body: str) -> str:
+    """Text of the ## Phases section — from the level-2 'Phases' heading up to the
+    next level-1/2 heading (so the ### Phase sub-blocks are included), or '' when
+    absent. HTML comments stripped first. Mirrors the region daemon parse_phases
+    reads (the daemon's ## splitter keeps the whole block; here _sections splits
+    on every level, so the region is collected explicitly)."""
+    stripped = re.sub(r"<!--.*?-->", "", body or "", flags=re.DOTALL)
+    region: list[str] = []
+    inside = False
+    for line in stripped.splitlines():
+        m = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$", line)
+        if m:
+            level = len(m.group(1))
+            title = m.group(2).strip().lower()
+            if inside and level <= 2:
+                break  # next level-1/2 section ends the Phases region
+            if level <= 2 and title == "phases":
+                inside = True
+                continue
+        if inside:
+            region.append(line)
+    return "\n".join(region)
+
+
+def has_structured_phases(body: str) -> bool:
+    """True iff the body has a ## Phases section with ≥1 ### Phase sub-block — the
+    first-class, daemon-parsed format (mirrors ``parse_phases(body) != []``)."""
+    return bool(_PHASE_HEADING_RE.search(_phases_region(body)))
+
+
+def parse_phase_skills(body: str) -> list[str]:
+    """All distinct ``skills:`` declared across the ## Phases sub-blocks (#40)."""
+    out: list[str] = []
+    for m in _SKILLS_LINE_RE.finditer(_phases_region(body)):
+        for token in m.group(1).split(","):
+            name = token.strip().strip("`").strip()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def parse_phase_agent_types(body: str) -> list[str]:
+    """All distinct ``agent-type:`` declared across the ## Phases sub-blocks (#40)."""
+    out: list[str] = []
+    for m in _AGENT_TYPE_LINE_RE.finditer(_phases_region(body)):
+        name = m.group(1).strip().strip("`").strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 def unknown_skills(body: str, repo_root: str, agent_home: str) -> list[str]:
     """Declared skills not found locally, in declaration order (advisory only).
 
     A bare name is checked against the repo's ``.claude/skills/``; a ``x:y`` ref
     against the local plugin cache. Mirrors the daemon's transient-safety: when
     NO plugins are installed in the author env the plugin check is skipped (so a
-    valid plugin ref is not falsely flagged) — the daemon is the hard gate."""
+    valid plugin ref is not falsely flagged) — the daemon is the hard gate.
+    Includes per-phase ``skills:`` (issue #40) so a bad phase skill warns too."""
     declared = parse_declared_skills(body)
+    for name in parse_phase_skills(body):  # union with per-phase skills (#40)
+        if name not in declared:
+            declared.append(name)
     if not declared:
         return []
     project_names = enumerate_project_skills(repo_root)
@@ -290,6 +351,21 @@ def unknown_agent_type(body: str, repo_root: str, agent_home: str):
     return None if name in known else name
 
 
+def unknown_phase_agent_types(body: str, repo_root: str, agent_home: str) -> list[str]:
+    """Per-phase ``agent-type:`` names (## Phases, issue #40) that resolve to no
+    known sub-agent, in declaration order (advisory only — the daemon validates
+    the union and is the hard gate)."""
+    names = parse_phase_agent_types(body)
+    if not names:
+        return []
+    known = (
+        _BUILTIN_AGENT_TYPES
+        | enumerate_project_agents(repo_root)
+        | enumerate_user_and_plugin_agents(agent_home)
+    )
+    return [n for n in names if n not in known]
+
+
 def detect_phased_pattern(body: str) -> bool:
     """Return True if the body looks like a phased / sub-agent-delegation plan
     of the pps-web#299 shape — a plan that may assume daemon-orchestrated
@@ -297,35 +373,49 @@ def detect_phased_pattern(body: str) -> bool:
 
     Conservative: false-negatives are preferred over false-positives.
 
-    Signals (any one is sufficient):
-    - A ``## Phases`` heading, OR
-    - Two or more distinct ``Phase N`` enumerations (Phase 1, Phase 2 …), OR
-    - Two or more imperative delegation lines
-      (``use `X` to …``, ``run `Y` to …``, ``delegate to `Z```), OR
-    - One Phase N enum AND one delegation line together.
+    Signals:
+    - STRONG (a genuine MULTI-STAGE chain — the pps-web#299/#302 shape): a bare
+      ``## Phases`` heading without ``### Phase`` sub-blocks, OR two or more
+      distinct ``Phase N`` enumerations (Phase 1, Phase 2 …), OR one ``Phase N``
+      enum together with a delegation line.
+    - WEAK (delegation verbs only, no phase enumeration): two or more imperative
+      delegation lines (``use `X` to …``, ``run `Y` to …``, ``delegate to `Z```).
 
-    Suppressed when a validated ``agent-type:`` or ``skills:`` directive is
-    already declared — those are the supported, validated paths.
+    Suppression (issue #42 + #40):
+    - A first-class ``## Phases`` section (``### Phase`` sub-blocks) → the
+      supported, daemon-parsed path → never warn.
+    - A single validated ``agent-type:`` / ``skills:`` directive suppresses ONLY
+      the WEAK signal: one directive legitimately covers a one-agent multi-step
+      task. It does NOT suppress a STRONG multi-stage chain — a single directive
+      does not make a multi-stage chain run deterministically; that needs
+      ``## Phases`` (this is exactly the pps-web#302 trap, where
+      ``agent-type: web-implement`` + a prose Phase 1/2/3 chain previously got no
+      nudge). A STRONG signal therefore always warns (steer the author to
+      ``## Phases``).
     Ordinary prose containing the word "phase" without enumeration or
     delegation verbs does NOT trigger this function.
     """
     stripped = re.sub(r"<!--.*?-->", "", body or "", flags=re.DOTALL)
-    # Validated directives present → the author is already on the supported path.
-    if parse_agent_type(stripped) is not None:
+    # First-class ## Phases (issue #40) → the supported, daemon-parsed path; the
+    # per-phase directives are validated separately. Do not warn.
+    if has_structured_phases(stripped):
         return False
-    if parse_declared_skills(stripped):
-        return False
-    # Signal 1: ## Phases heading
-    if re.search(r"(?im)^#{1,6}\s+phases\s*$", stripped):
-        return True
-    # Signal 2 / 3: phase enumeration and/or delegation verbs
     phase_nums = set(_PHASE_NUM_RE.findall(stripped))
     deleg_hits = _DELEGATION_RE.findall(stripped)
-    if len(phase_nums) >= 2:
+    # STRONG: a genuine multi-stage chain. A bare ``## Phases`` heading (no
+    # ### sub-blocks — would not be daemon-parsed), ≥2 ``Phase N`` enumerations,
+    # or one ``Phase N`` enum plus a delegation line. Warns regardless of a single
+    # issue-level agent-type:/skills: (those don't make a chain deterministic).
+    bare_phases_heading = bool(re.search(r"(?im)^#{1,6}\s+phases\s*$", stripped))
+    if bare_phases_heading or len(phase_nums) >= 2 or (phase_nums and deleg_hits):
         return True
+    # WEAK: delegation verbs only (no phase enumeration). A single validated
+    # agent-type:/skills: legitimately covers a one-agent multi-step task → suppress.
     if len(deleg_hits) >= 2:
+        if parse_agent_type(stripped) is not None or parse_declared_skills(stripped):
+            return False
         return True
-    return bool(phase_nums and deleg_hits)
+    return False
 
 
 def main(argv: list[str]) -> int:
@@ -358,19 +448,34 @@ def main(argv: list[str]) -> int:
             f"an issue whose agent-type is unresolvable, so fix this before posting.",
             file=sys.stderr,
         )
-    # Phased-plan advisory (issue #42): warn-only, NEVER a gate failure.
+    # Per-phase agent-type advisory (issue #40): warn for any ## Phases sub-block
+    # naming an unknown sub-agent. The daemon validates the UNION pre-claim.
+    unknown_phase_at = unknown_phase_agent_types(
+        body, repo_root=os.getcwd(), agent_home=os.path.expanduser("~")
+    )
+    if unknown_phase_at:
+        listed = ", ".join(unknown_phase_at)
+        print(
+            f"⚠️  WARNING: per-phase agent-type(s) not found in this environment: "
+            f"{listed}. Check the `agent-type:` lines in your ## Phases sub-blocks "
+            f"— each must be a flat `.claude/agents/<name>.md` in the repo, a "
+            f"user/plugin agent, or a Claude Code built-in. The daemon HARD-BLOCKS "
+            f"an issue if ANY phase's agent-type is unresolvable.",
+            file=sys.stderr,
+        )
+    # Phased-plan advisory (issue #42/#40): warn-only, NEVER a gate failure. Only
+    # fires for the UNSTRUCTURED prose shape (no first-class ## Phases section).
     phased = detect_phased_pattern(body)
     if phased:
         print(
             "⚠️  WARNING: this issue looks like a phased / sub-agent-delegation "
-            "plan (pps-web#299 shape). The daemon runs ONE model per issue and "
-            "does NOT orchestrate phases — the main Claude agent does that at "
-            "runtime (best-effort). Ensure any prose-referenced agent exists in "
-            "the target repo's .claude/agents/ (e.g. web-implement, "
-            "web-pre-commit), or use the validated `agent-type:`/`skills:` "
-            "directives instead. To use different models per phase, split into "
-            "separate issues. See developer-manual §2.14 (Phased / multi-agent "
-            "work).",
+            "plan written in prose (pps-web#299 shape) WITHOUT a first-class "
+            "`## Phases` section. Such prose is unvalidated — the main Claude "
+            "agent orchestrates it best-effort and a typo'd prose agent name "
+            "silently degrades to manual implementation. For deterministic, "
+            "validated per-stage execution (each stage its own committed run, "
+            "with its own model/skills/agent-type), convert it to a `## Phases` "
+            "section with `### Phase N:` sub-blocks. See developer-manual §2.15.",
             file=sys.stderr,
         )
     print(
@@ -381,6 +486,7 @@ def main(argv: list[str]) -> int:
                 "depends_on": result.depends_on,
                 "unknown_skills": unknown,
                 "unknown_agent_type": unknown_at,
+                "unknown_phase_agent_types": unknown_phase_at,
                 "phased_plan_warning": phased,
             }
         )

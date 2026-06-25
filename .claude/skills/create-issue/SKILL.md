@@ -132,6 +132,19 @@ detect it at post time and offer two options:
    unassigns) if the name resolves to no known sub-agent. **Never invent a name**;
    `validate_issue.py` warns loudly about an `agent-type:` it can't find locally.
    Omit the line for no steering (unchanged).
+5d. **Declare ordered phases (optional, single-repo).** When the issue decomposes
+   into stages of differing difficulty (cheap setup → hard core → trivial docs) or
+   a gated chain (implement → polish → pre-commit), add a `## Phases` section with
+   `### Phase N: <title>` sub-blocks, each carrying its own optional
+   `model:`/`skills:`/`agent-type:` (same line format as `## Agent Configuration`)
+   plus its instructions. The daemon runs **each phase as its own committed Claude
+   run on the same branch, in order**, then opens one MR. A directive a phase omits
+   **cascades** to the issue-level value (then `sonnet` for model). Every phase's
+   `skills:`/`agent-type:` is validated pre-claim (the **union**), so a typo in any
+   phase HARD-BLOCKS the whole issue — `validate_issue.py` warns on unknown
+   per-phase names. **Single-repo only**: a multi-repo issue (`## Repositories /
+   branches`) with `## Phases` runs as one pass at the issue-level model. Omit the
+   section to run as a single pass (unchanged). See developer-manual §2.15.
 6. **Draft the full body** against the template:
    - Bugs → fill **Reproduction** (steps, expected, actual, logs, env).
    - Features/refactors → fill **Design** (concrete approach, files/APIs to touch),
@@ -168,6 +181,14 @@ detect it at post time and offer two options:
      Omit entirely for single-repo issues with no in-flight deps.
      Note: `Depends-on:` is not yet supported for multi-repo issues (the daemon
      will warn and proceed without composition).
+   - **Superseding / superseded work (cross-link convention).** When this issue
+     takes over part of another issue's scope — or is itself replaced by one —
+     record it as an **uncommented** `Supersedes: #N` / `Superseded-by: #N` line in
+     `## Dependencies`. Unlike `Depends-on:`, these are **convention only — not
+     parsed or enforced**: they exist to make scope overlap visible on BOTH issues
+     so a reviewer or agent can see what's already owned elsewhere (avoiding
+     duplicate / conflicting MRs). If an issue is *fully* superseded, prefer
+     closing it; use the line when it stays open for a residual slice.
 7. **Validate.** Write the draft to a temp file and run
    `python scripts/validate_issue.py <file>`. If `ok` is false, for each missing
    section ask the user a targeted question (or draft it), then re-validate. Loop
@@ -260,32 +281,50 @@ the project default branch.
   switches the agent to multi-repo mode. Only include it for true submodule work.
 - **Posting to an unassigned project.** If `post_issue.py` exits 3, the project
   isn't wired to an agent — assign it first; don't force the label.
+- **Filing a multi-concern note as one issue.** If a capture or follow-up spans
+  more than one independent fix, **split it** — file each as its own scoped issue
+  (split-on-file). A single issue mixing concerns can't pass the gate cleanly and
+  risks an agent re-touching work another issue already owns. Cross-link the
+  pieces with `Supersedes:` / `Superseded-by:` in `## Dependencies`.
 
 ## Phased / multi-agent tasks
 
-Writing a multi-phase plan in prose is natural and **supported**: the daemon passes
-the prose through and the **main Claude agent orchestrates** the sequence at
-runtime, delegating to sub-agents that exist in the target repo's
-`.claude/agents/`. Each sub-agent carries its own model, effort, and tools.
+For ordered stages — differing difficulty (cheap setup → hard core → trivial docs)
+or a gated chain (implement → polish → pre-commit) — use a first-class **`## Phases`**
+section (single-repo). Each `### Phase N: <title>` sub-block carries its own optional
+`model:` / `skills:` / `agent-type:` (same line format as `## Agent Configuration`)
+plus its instructions, and the daemon runs **each phase as its own committed Claude
+run on the same branch, in order**, then opens one MR:
 
-**To write a phased plan:** reference sub-agents by name in `## Design` or
-`## Agent Configuration` (e.g. `use \`web-implement\` to build, run
-\`web-pre-commit\` to gate`). **Confirm each referenced agent exists** in the
-target repo's `.claude/agents/` before posting — a prose reference is not
-validated by the daemon, so a nonexistent name silently falls back to manual
-implementation (the #299 bug).
+```
+## Phases
 
-**Prefer the validated directives** when a single agent or skill covers the whole
-task: `agent-type: web-implement` or `skills: web-implement` in
-`## Agent Configuration`. The daemon validates existence pre-claim; a typo parks
-the issue `agent-blocked` rather than silently degrading.
+### Phase 1: Implement
+agent-type: web-implement
+Build the feature against the plan.
 
-**Different models per phase?** The daemon runs **one model per issue**. Split
-into separate issues (one per model-distinct phase) connected by `Depends-on:`
-or GitLab blocking issues. If all phases use the same model, a single issue
-with a prose plan is correct.
+### Phase 2: Core logic
+model: opus
+Implement the hard algorithm.
 
-`validate_issue.py` emits an advisory warning (never blocks) when it detects a
-phased / delegation plan that may assume daemon-orchestrated phase switching.
+### Phase 3: Docs
+model: haiku
+Update docstrings + changelog.
+```
 
-Full guidance: [developer-manual §2.14 — Phased / multi-agent work](../../../docs/developer-manual.md#214-phased--multi-agent-work).
+A directive a phase omits **cascades** to the issue-level value (then `sonnet` for
+model). Every phase's `skills:`/`agent-type:` is validated **pre-claim** (the union
+with the issue-level ones), so a typo in any phase HARD-BLOCKS the whole issue —
+`validate_issue.py` warns on unknown per-phase names. **Single-repo only:** a
+multi-repo issue (`## Repositories / branches`) with `## Phases` runs as one pass at
+the issue-level model.
+
+**Prose alternative (no `## Phases`).** If you only need the main agent to delegate
+to project sub-agents at runtime (all stages at one model), name sub-agents in prose
+in `## Design` (e.g. `use \`web-implement\` to build, run \`web-pre-commit\` to
+gate`). This is **non-deterministic** and **unvalidated** — a nonexistent prose name
+silently falls back to manual implementation (the #299 bug); `validate_issue.py`
+warns when it detects this shape. Prefer `## Phases` (validated, deterministic) or
+the issue-level `agent-type:`/`skills:` directives.
+
+Full guidance: [developer-manual §2.15 — First-class per-phase config](../../../docs/developer-manual.md#215-first-class-per-phase-config-phases).

@@ -26,8 +26,9 @@
     - Test Cases → the feature's ratified Gherkin scenarios (Contract 2),
                    VERBATIM from the catalog, tags and all.
     - Agent Configuration → keep model: sonnet (bump to opus for heavy E2E);
-                   keep the skills: line (add web/E2E skills where the repo
-                   warrants).
+                   resolve and set the skills: line only if a TDD skill is
+                   confirmed available in the target env (see the decision tree
+                   in the ## Agent Configuration comment below).
 -->
 
 ## Summary
@@ -113,29 +114,34 @@ Paste the feature's ratified Gherkin scenarios here (verbatim from the catalog, 
 
 ## Agent Configuration
 <!-- Pre-filled per Contract 3. The daemon honours an UNCOMMENTED model: line
-     and the skills: line below (it validates every declared skill pre-claim and
-     HARD-BLOCKS the issue if any is unknown — so only declare skills that exist).
+     and, if present, an UNCOMMENTED skills: line (it validates every declared
+     skill pre-claim and HARD-BLOCKS the issue if any id is unresolvable).
        - model: sonnet is right for in-process unit/integration test work.
          Bump to `model: opus` for heavy or wide E2E suites (browser-driven,
          many flows, tricky async).
-       - skills: superpowers:test-driven-development is the adopted canon for
-         Flow-A test implementation (red-green-refactor). For WEB / E2E work,
-         also add `webapp-testing` and/or `playwright-generate-test` IF they
-         exist in the target repo / the agent's plugins (confirm first — an
-         unknown skill parks the issue agent-blocked).
-     SKILL-ENV CAVEAT (applies to EVERY declared skill, not just the web ones):
-     skills are resolved in the IMPLEMENTING agent's environment, not this one —
-     confirm the target repo's agent actually has `superpowers:test-driven-
-     development` (and any web/E2E skill you add) or the issue parks
-     `agent-blocked` on claim. Note also that the in-repo skill is the BARE name
-     `tdd`; it is NOT interchangeable with the plugin id
-     `superpowers:test-driven-development` — declare whichever one the target
-     agent actually provides. -->
+       - skills: is COMMENTED OUT by default. The fan-out agent MUST check the
+         target environment and ONLY uncomment + set the line after resolving
+         which id is actually available there:
+
+           1. If .claude/skills/tdd/SKILL.md exists in the target repo
+              → uncomment and set:  skills: tdd
+           2. Else if the agent has the superpowers plugin installed
+              → uncomment and set:  skills: superpowers:test-driven-development
+           3. If neither is available → leave the skills: line commented out.
+              The daemon no-ops on an empty declaration; the issue is NOT blocked.
+
+         The bare name `tdd` and the plugin id `superpowers:test-driven-
+         development` are NOT interchangeable at the skill gate — declare the
+         one that the target agent actually provides, or omit entirely. An
+         unresolvable skill id parks the issue agent-blocked on claim.
+       - For web / E2E skills (webapp-testing, playwright-generate-test): apply
+         the same three-step env-check before adding them. -->
 model: sonnet
-skills: superpowers:test-driven-development
-<!-- For web / E2E, prefer:
+<!-- skills: tdd | superpowers:test-driven-development -->
+<!-- For web / E2E work, also resolve webapp-testing / playwright-generate-test
+     using the same env-check. Bump model to opus for heavy E2E suites:
      model: opus
-     skills: superpowers:test-driven-development, webapp-testing, playwright-generate-test -->
+     skills: tdd | superpowers:test-driven-development, webapp-testing, playwright-generate-test -->
 
 ## Constraints
 <!-- OPTIONAL — delete if none. Non-functional limits for the test work, e.g.:

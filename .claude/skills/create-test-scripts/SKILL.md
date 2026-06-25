@@ -46,6 +46,10 @@ test-script specializations:
      `skills: superpowers:test-driven-development` (add `webapp-testing` / `playwright-generate-test`
      for web/E2E — confirm they exist in the **target agent's** environment, or the issue parks
      `agent-blocked`).
+   - **Staged test work?** If the suite splits into distinct stages with different
+     models/skills/agent-types (e.g. scaffold fixtures → write tests → wire CI), declare a
+     `## Phases` section instead of one config — the daemon runs each phase as its own committed
+     run, in order. See create-issue's "Phased / multi-agent tasks" + developer-manual §2.15.
 3. **Reuse create-issue's scripts** (no duplication — repo-root-relative, run from the repo root):
    ```bash
    python .claude/skills/create-issue/scripts/load_template.py            # the canonical template
