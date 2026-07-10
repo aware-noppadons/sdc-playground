@@ -11,11 +11,13 @@
 -->
 
 ## Type
-<!-- bug | feature | refactor | chore | research | test
+<!-- bug | feature | refactor | chore | research | test | graph
      Stamped on the issue as a scoped `type::<x>` label (e.g. type::bug) when
      filed via /create-issue, so the operator's Kanban board can filter by type.
-     Pick exactly one of: bug | feature | refactor | chore | research | test.
-     (test = writing automated test scripts/cases)
+     Pick exactly one of: bug | feature | refactor | chore | research | test | graph.
+     (test = writing automated test scripts/cases; graph = knowledge-graph
+     init/update task, run by graphify on the SDC fleet — nothing installed
+     locally)
      Note: the Type does NOT set the model — see Agent Configuration below. -->
 
 ---
@@ -146,7 +148,7 @@
      A commented line is inert. If no uncommented `model:` line is present, the
      daemon defaults to sonnet. The Type label is NOT mapped to a model — it
      drives labels/board only. `thinking` is advisory only — not enforced. -->
-<!-- model: opus | sonnet | haiku   ← HIGHLY RECOMMENDED: uncomment and pick one -->
+<!-- model: opus | sonnet | haiku | glm   ← HIGHLY RECOMMENDED: uncomment and pick one -->
 <!-- thinking: low | medium | high | max   (advisory only — not yet enforced by the daemon) -->
 <!-- design-mode: provided | agent-designs -->
 <!-- scope: single-repo | multi-repo   (advisory — multi-repo mode is triggered by the "Repositories / branches" section) -->

@@ -76,7 +76,7 @@ detect it at post time and offer two options:
      (→ Assumption)?"*
    - **Not a gate:** the pre-pass enriches the draft only; `validate_issue.py`
      remains the sole hard gate.
-5. **Infer the Type** (`bug | feature | refactor | chore | research | test`). The
+5. **Infer the Type** (`bug | feature | refactor | chore | research | test | graph`). The
    Type is stamped on the issue as a scoped `type::<x>` label at post time (pass
    `--type <inferred>` to `post_issue.py`, step 9), so the operator board's type
    filter can use it. (The type labels are provisioned on the project at assign
@@ -90,6 +90,9 @@ detect it at post time and offer two options:
    - `test` — writing automated test scripts/cases (use this when the deliverable
      is *tests*, not application code — e.g. adding a test suite, automating
      existing Given/When/Then cases, implementing E2E scenarios).
+   - `graph` — a knowledge-graph init/update task for the target repo. Filing it
+     needs nothing installed locally — `graphify` runs on the SDC fleet agent
+     that picks up the issue, not on the filer's machine.
 5a. **Suggest a model (highly recommended).** Assess the task and recommend a
    `model:` for the agent:
    - **`opus`** — heavy, architectural, or hard-to-debug work (complex refactors,
@@ -157,6 +160,25 @@ detect it at post time and offer two options:
      automate, written as Given/When/Then. In `## Agent Configuration` recommend
      `skills: superpowers:test-driven-development`; for web/E2E work also add
      `webapp-testing` and/or `playwright-generate-test` if available.
+   - **Knowledge-graph tasks** (`type::graph`) → fill **Design** naming the scope
+     (the repo, or a subtree) to graph and the integration level (`full` |
+     `section` | `artifact-only`), then the steps: (1) ensure `graphify` is
+     installed (`uv tool install graphifyy`) — this runs on the **SDC fleet
+     agent** that claims the issue; nothing is installed on the filer's own
+     machine; (2) write `.graphifyignore` excluding the `.gitmodules` submodule
+     paths and any nested directory that already has its own
+     `graphify-out/graph.json`; (3) `graphify update` if `graphify-out/graph.json`
+     already exists, else `graphify extract --backend claude`; (4) apply the
+     integration level; (5) commit a **graph-only merge request** — the diff must
+     touch only `graphify-out/` (plus the named integration files for
+     `full`/`section`), never mixed with unrelated changes. **Acceptance
+     Criteria** = `.graphifyignore` correctness, the artifact present and
+     current, the integration level applied, and the MR being graph-only.
+     **Test Cases** = Given/When/Then for install-if-missing, ignore-file
+     exclusions, the update-vs-extract branch, and the MR-diff-scope check.
+     Mirror `control-plane/app/knowledge_graph.py`'s `graph_issue_body` (the
+     canonical generator the control plane itself uses when filing a refresh)
+     rather than inventing new wording.
    - Always → **Summary**, **Context**, **Acceptance Criteria** (checkable, real),
      **Test Cases** (`Given / When / Then`, real), **Codebase Hints** (actual
      files/patterns), **Constraints**, **Dependencies** as relevant.
@@ -231,7 +253,7 @@ detect it at post time and offer two options:
 | Post (glab, primary) | `python3 scripts/post_issue.py --title … --body-file … --type <type> [--repo …]` (add `--no-ready` to skip the label) |
 | Post (browser fallback) | `python3 scripts/post_issue.py --title … --body-file … --type <type> [--repo …] --method browser` |
 
-`--type` is one of `bug | feature | refactor | chore | research | test` (the inferred Type); it stamps a scoped `type::<x>` label that joins `agent-ready` and, on the browser fallback, rides the `/label` paste lines.
+`--type` is one of `bug | feature | refactor | chore | research | test | graph` (the inferred Type); it stamps a scoped `type::<x>` label that joins `agent-ready` and, on the browser fallback, rides the `/label` paste lines.
 
 **Prerequisite gate** (mirrored by `validate_issue.py`): a non-empty `## Design`
 *or* an uncommented `design-mode: agent-designs`; a non-empty

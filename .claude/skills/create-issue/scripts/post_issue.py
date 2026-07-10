@@ -50,7 +50,7 @@ AGENT_LABELS = [
 # Issue-type vocabulary (board v2 §2c). The skill infers one of these (SKILL.md
 # §5) and passes it via --type; we stamp it as a scoped `type::<x>` label so the
 # board's type filter can use it. Same vocabulary as the template's ## Type field.
-ISSUE_TYPES = ["bug", "feature", "refactor", "chore", "research", "test"]
+ISSUE_TYPES = ["bug", "feature", "refactor", "chore", "research", "test", "graph"]
 
 # Labels that post_issue.py is permitted to emit. Mirrors the frozenset pattern
 # in validate_issue.py:_BUILTIN_AGENT_TYPES. Any --label value outside this set

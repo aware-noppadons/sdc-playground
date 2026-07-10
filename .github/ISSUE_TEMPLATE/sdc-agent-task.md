@@ -154,7 +154,7 @@ labels: agent-ready
      A commented line is inert. If no uncommented `model:` line is present, the
      daemon defaults to sonnet. The Type label is NOT mapped to a model — it
      drives labels/board only. `thinking` is advisory only — not enforced. -->
-<!-- model: opus | sonnet | haiku   ← HIGHLY RECOMMENDED: uncomment and pick one -->
+<!-- model: opus | sonnet | haiku | glm   ← HIGHLY RECOMMENDED: uncomment and pick one -->
 <!-- thinking: low | medium | high | max   (advisory only — not yet enforced by the daemon) -->
 <!-- design-mode: provided | agent-designs -->
 <!-- scope: single-repo | multi-repo   (advisory — multi-repo mode is triggered by the "Repositories / branches" section) -->
