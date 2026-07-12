@@ -23,5 +23,10 @@ Agent identities are VM-qualified: `sdc-<designation>-agent-<NN>` (e.g. `sdc-01-
 - `## Acceptance Criteria` (≥ 1 checkable item)
 - `## Test Cases` (≥ 1 Given / When / Then)
 
+**Keep `graphify-out/` out of your MR:** if this repo has a `graphify-out/` knowledge graph,
+treat it as generated output — do NOT run `graphify update`/`graphify extract` or commit
+`graphify-out/` as part of a feature/bug/refactor/chore change. Graph refreshes land separately
+as graph-only `type::graph` MRs; discard any `graphify-out/` changes before committing.
+
 Full guidance: [SDC Developer Manual](https://gitlab2.aware.co.th/arai/sdc/-/blob/master/docs/developer-manual.md)
 <!-- END SDC -->

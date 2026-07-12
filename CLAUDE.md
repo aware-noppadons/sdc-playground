@@ -29,5 +29,14 @@ specialized for `type::test`.
 - `## Acceptance Criteria` (≥ 1 checkable item)
 - `## Test Cases` (≥ 1 Given / When / Then)
 
+### Implementing an issue — keep `graphify-out/` out of your MR
+
+If this repo has a `graphify-out/` knowledge graph, treat it as **generated output**:
+do **not** run `graphify update` / `graphify extract` or commit `graphify-out/` as part
+of a feature, bug, refactor, or chore MR. A regenerated `graph.json` churns thousands of
+lines and must never ride a code change. Knowledge-graph refreshes are landed **separately**
+as graph-only `type::graph` MRs (SDC files them automatically). If `git status` shows
+`graphify-out/` changes, discard them before committing.
+
 Full guidance: [SDC Developer Manual](https://gitlab2.aware.co.th/arai/sdc/-/blob/master/docs/developer-manual.md)
 <!-- END SDC -->

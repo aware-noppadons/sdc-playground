@@ -148,6 +148,13 @@ detect it at post time and offer two options:
    per-phase names. **Single-repo only**: a multi-repo issue (`## Repositories /
    branches`) with `## Phases` runs as one pass at the issue-level model. Omit the
    section to run as a single pass (unchanged). See developer-manual §2.15.
+5e. **Opt into an automatic graph refresh (optional, `kg_enabled` repos only).**
+   Add an **uncommented** `refresh-graph: true` line in `## Agent Configuration`
+   when this issue's changes should keep the repo's knowledge graph current. On a
+   `kg_enabled` repo, once this issue's MR merges, SDC files a `type::graph`
+   refresh as a **separate** graph-only MR — it is never bundled into this issue's
+   MR. Leave the line out (or commented) for repos without a knowledge graph, or
+   when a manual refresh is preferred. See developer-manual §2.16 Pattern B.
 6. **Draft the full body** against the template:
    - Bugs → fill **Reproduction** (steps, expected, actual, logs, env).
    - Features/refactors → fill **Design** (concrete approach, files/APIs to touch),
